@@ -1,0 +1,14 @@
+[package]
+name = "schc-tap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+pnet = "0.35.0"
+tun-rs = "2.7.4"
+socket2 = { version = "0.6.1", features = ["all"] }
+bitvec = "1.0.1"
+
+[dev-dependencies]
+hex = "0.4.3"
