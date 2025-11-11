@@ -549,13 +549,13 @@ pub fn load_rules() -> RuleSet {
                     .collect(),
             },
             // Unknown over IPv6, flow label = 0
-            Rule {
-                field_descriptors: ipv6_descriptors,
-            },
+            // Rule {
+            //     field_descriptors: ipv6_descriptors,
+            // },
             // Unknown over IPv6, flow label != 0
-            Rule {
-                field_descriptors: ipv6_descriptors_with_flow_label,
-            },
+            // Rule {
+            //     field_descriptors: ipv6_descriptors_with_flow_label,
+            // },
         ],
     }
 }
