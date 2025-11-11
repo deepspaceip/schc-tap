@@ -1,9 +1,12 @@
 mod schc;
+mod schc_rules;
 mod varint;
 
-use crate::schc::{Direction, RuleSet};
 use anyhow::bail;
+use clap::Parser;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use schc::Direction;
+use schc_rules::{NetmaskPair, RuleOptions, RuleSet};
 use std::sync::Arc;
 use std::thread;
 use tun_rs::{DeviceBuilder, Layer, SyncDevice};
@@ -37,7 +40,7 @@ fn process_frame(
     match direction {
         Direction::Uplink => {
             // The frame is leaving the interface, so we have to compress
-            let compressed = schc::compress_frame(rules, &frame, direction);
+            let compressed = schc::compress_frame(rules, &frame);
             println!(
                 "C ({ethertype}): {} -> {}",
                 frame_bytes.len(),
@@ -61,9 +64,13 @@ fn process_frame(
 fn forward_frames(
     receiver: &SyncDevice,
     sender: &SyncDevice,
+    netmask_pairs: Vec<NetmaskPair>,
     direction: Direction,
 ) -> anyhow::Result<()> {
-    let rules = schc::load_rules();
+    let rules = schc_rules::load_rules(&RuleOptions {
+        compress_netmask_pairs: netmask_pairs,
+        ..RuleOptions::default()
+    });
     let mut buf = vec![0u8; 65536];
     loop {
         let n = receiver.recv(&mut buf)?;
@@ -87,23 +94,35 @@ fn forward_frames(
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("Usage: {} <in_tap_ifname> <out_tap_ifname>", args[0]);
-        std::process::exit(1);
-    }
+#[derive(Parser)]
+struct Cli {
+    #[arg(short, long)]
+    swap_netmask_pairs: bool,
+    in_tap_ifname: String,
+    out_tap_ifname: String,
+    netmask_pairs: Vec<NetmaskPair>,
+}
 
-    let in_name = &args[1];
-    let out_name = &args[2];
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let in_name = &cli.in_tap_ifname;
+    let out_name = &cli.out_tap_ifname;
+    let mut netmask_pairs = cli.netmask_pairs;
+    if cli.swap_netmask_pairs {
+        netmask_pairs = netmask_pairs.into_iter().map(|p| p.swapped()).collect();
+    }
 
     let tap_in = open_tap(in_name, "10.10.0.22", "fe80::22")?;
     let tap_out = open_tap(out_name, "10.10.0.33", "fe80::33")?;
 
     let tap_in_cp = tap_in.clone();
     let tap_out_cp = tap_out.clone();
-    thread::spawn(move || forward_frames(&tap_in_cp, &tap_out_cp, Direction::Uplink));
-    thread::spawn(move || forward_frames(&tap_out, &tap_in, Direction::Downlink));
+    let netmask_pairs_cp = netmask_pairs.clone();
+    thread::spawn(move || {
+        forward_frames(&tap_in_cp, &tap_out_cp, netmask_pairs_cp, Direction::Uplink)
+    });
+    thread::spawn(move || forward_frames(&tap_out, &tap_in, netmask_pairs, Direction::Downlink));
 
     // Wait for a newline before closing
     std::io::stdin().read_line(&mut String::new())?;
