@@ -1,4 +1,5 @@
 mod schc;
+mod varint;
 
 use crate::schc::{Direction, RuleSet};
 use anyhow::bail;

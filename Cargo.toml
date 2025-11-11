@@ -9,6 +9,7 @@ pnet = "0.35.0"
 tun-rs = "2.7.4"
 socket2 = { version = "0.6.1", features = ["all"] }
 bitvec = "1.0.1"
+leb128 = "0.2.5"
 
 [dev-dependencies]
 hex = "0.4.3"

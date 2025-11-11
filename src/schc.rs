@@ -1,5 +1,6 @@
 #![allow(clippy::match_like_matches_macro)]
 
+use crate::varint;
 use bitvec::bitvec;
 use bitvec::field::BitField;
 use bitvec::order::Msb0;
@@ -10,7 +11,9 @@ use pnet::packet::ethernet::EthernetPacket;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
-use std::io::Write;
+use std::io::{Cursor, Write};
+
+const NO_RULE_ID: u8 = 0;
 
 const ETHERNET_HEADER_LEN_BYTES: usize = 14;
 
@@ -114,12 +117,12 @@ impl Rule {
         true
     }
 
-    fn compress(&self, rule_id: u8, frame: &EthernetPacket) -> Vec<u8> {
+    fn compress(&self, rule_id: u64, frame: &EthernetPacket) -> Vec<u8> {
         let mut compressed: BitVec<u8, Msb0> = BitVec::new();
         compressed
             .write_all(&frame.packet()[..ETHERNET_HEADER_LEN_BYTES])
             .unwrap();
-        compressed.write_all(&[rule_id]).unwrap();
+        varint::encode(&mut compressed, rule_id);
 
         let packet_bits: &BitSlice<_, Msb0> = BitSlice::from_slice(frame.payload());
         let mut position_bits = 0;
@@ -175,14 +178,14 @@ impl Rule {
         compressed.into_vec()
     }
 
-    fn decompress(&self, compressed_frame: &EthernetPacket) -> Vec<u8> {
+    fn decompress(&self, compressed_frame: &EthernetPacket, rule_id_len: usize) -> Vec<u8> {
         let mut decompressed: BitVec<u8, Msb0> = BitVec::new();
         decompressed
             .write_all(&compressed_frame.packet()[..ETHERNET_HEADER_LEN_BYTES])
             .unwrap();
 
         // Skip the leading rule id
-        let compressed_bytes = &compressed_frame.payload()[1..];
+        let compressed_bytes = &compressed_frame.payload()[rule_id_len..];
         let compressed_bits: &BitSlice<_, Msb0> = BitSlice::from_slice(compressed_bytes);
         let mut src_position_bits = 0;
 
@@ -378,13 +381,13 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
-    fn find(&self, frame: &EthernetPacket, direction: Direction) -> Option<(u8, &Rule)> {
+    fn find(&self, frame: &EthernetPacket, direction: Direction) -> Option<(u64, &Rule)> {
         let (rule_id, rule) = self
             .rules
             .iter()
             .enumerate()
             .find(|(_rule_id, rule)| rule.matches(frame, direction))?;
-        Some((rule_id as u8, rule))
+        Some((rule_id as u64, rule))
     }
 }
 
@@ -396,13 +399,13 @@ pub fn compress_frame(rules: &RuleSet, frame: &EthernetPacket, direction: Direct
     // The compressed header consists of a "rule id" and a compression residue (i.e. the output of
     // compressing the packet header with the Rule identified by that RuleID). The residue may be
     // empty.
-    let Some((rule_id, rule)) = rules.find(frame, direction) else {
+    let Some((rule_index, rule)) = rules.find(frame, direction) else {
         // No rule found
         let mut compressed = Vec::with_capacity(frame.packet().len() + 1);
         compressed.extend_from_slice(&frame.packet()[..ETHERNET_HEADER_LEN_BYTES]);
 
-        // Rule id 255 means we didn't compress
-        compressed.push(255);
+        // Rule id 0 means we didn't compress
+        compressed.push(NO_RULE_ID);
 
         // Now append the original payload
         compressed.extend_from_slice(frame.payload());
@@ -410,21 +413,25 @@ pub fn compress_frame(rules: &RuleSet, frame: &EthernetPacket, direction: Direct
         return compressed;
     };
 
+    let rule_id = rule_index + 1;
     rule.compress(rule_id, frame)
 }
 
 pub fn decompress_frame(rules: &RuleSet, frame: &EthernetPacket) -> Vec<u8> {
-    let rule_id = frame.payload()[0] as usize;
-    match rules.rules.get(rule_id) {
-        None => {
-            // Not compressed, so skip the rule id and return the rest
-            let mut decompressed = Vec::new();
-            decompressed.extend_from_slice(&frame.packet()[..ETHERNET_HEADER_LEN_BYTES]);
-            decompressed.extend_from_slice(&frame.payload()[1..]);
-            decompressed
-        }
-        Some(rule) => rule.decompress(frame),
+    let mut cursor = Cursor::new(frame.payload());
+    let rule_id = varint::decode(&mut cursor) as usize;
+    if rule_id == NO_RULE_ID as usize {
+        // Not compressed, so skip the rule id and return the rest
+        let mut decompressed = Vec::new();
+        decompressed.extend_from_slice(&frame.packet()[..ETHERNET_HEADER_LEN_BYTES]);
+        decompressed.extend_from_slice(&frame.payload()[1..]);
+        return decompressed;
     }
+
+    let rule_id_len = cursor.position() as usize;
+    let rule_index = rule_id - 1;
+    let rule = rules.rules.get(rule_index).unwrap();
+    rule.decompress(frame, rule_id_len)
 }
 
 pub fn load_rules() -> RuleSet {
@@ -562,11 +569,10 @@ mod tests {
     use pnet::packet::tcp::TcpPacket;
     use pnet::packet::udp::UdpPacket;
 
-    const IPV6_UDP_ID: u8 = 0;
-    const IPV6_UDP_WITH_FLOW_LABEL_ID: u8 = 1;
-    const IPV6_UNKNOWN_ID: u8 = 2;
-    const IPV6_UNKNOWN_WITH_FLOW_LABEL_ID: u8 = 3;
-    const NO_RULE_ID: u8 = u8::MAX;
+    const IPV6_UDP_ID: u8 = 1;
+    const IPV6_UDP_WITH_FLOW_LABEL_ID: u8 = 2;
+    const IPV6_UNKNOWN_ID: u8 = 3;
+    const IPV6_UNKNOWN_WITH_FLOW_LABEL_ID: u8 = 4;
 
     fn udp_over_ipv6() -> Vec<u8> {
         // Obtained from https://www.cloudshark.org/captures/1737557e3427
