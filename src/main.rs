@@ -7,7 +7,7 @@ use clap::Parser;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use schc::Direction;
 use schc_rules::{NetmaskPair, RuleOptions, RuleSet};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use tun_rs::{DeviceBuilder, Layer, SyncDevice};
 
@@ -90,7 +90,6 @@ fn forward_frames(
         }
     }
 
-    println!("Shutting down forwarder...");
     Ok(())
 }
 
@@ -119,12 +118,36 @@ fn main() -> anyhow::Result<()> {
     let tap_in_cp = tap_in.clone();
     let tap_out_cp = tap_out.clone();
     let netmask_pairs_cp = netmask_pairs.clone();
-    thread::spawn(move || {
+    let t1 = thread::spawn(move || {
         forward_frames(&tap_in_cp, &tap_out_cp, netmask_pairs_cp, Direction::Uplink)
     });
-    thread::spawn(move || forward_frames(&tap_out, &tap_in, netmask_pairs, Direction::Downlink));
+    let t2 = thread::spawn(move || {
+        forward_frames(&tap_out, &tap_in, netmask_pairs, Direction::Downlink)
+    });
 
-    // Wait for a newline before closing
-    std::io::stdin().read_line(&mut String::new())?;
+    println!("Forwarding incoming ethernet frames from {in_name} to {out_name}...");
+
+    // This is a bit cumbersome, but is the only way I found to be notified of errors/crashes in the
+    // forwarding threads (without extra dependencies)
+    let (done_tx, done_rx) = mpsc::channel();
+    let done_tx_cp = done_tx.clone();
+    let t1_name = format!("{in_name} -> {out_name}");
+    let t2_name = format!("{out_name} -> {in_name}");
+    thread::spawn(move || {
+        done_tx_cp.send((t1_name, t1.join())).unwrap();
+    });
+    thread::spawn(move || {
+        done_tx.send((t2_name, t2.join())).unwrap();
+    });
+    if let Ok((t_name, msg)) = done_rx.recv() {
+        let extra = match msg {
+            Ok(Ok(_)) => "(the thread exited cleanly)".to_string(),
+            Ok(Err(e)) => format!("(the thread exited with an error: {e:?})"),
+            Err(_) => "(the thread panicked)".to_string(),
+        };
+        println!("The forwarding thread for {t_name} terminated unexpectedly {extra}");
+    }
+
+    println!("Shutting down!");
     Ok(())
 }
