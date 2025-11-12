@@ -4,7 +4,9 @@ mod varint;
 
 use anyhow::bail;
 use clap::Parser;
+use pnet::packet::Packet;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet::packet::ipv6::Ipv6Packet;
 use schc::Direction;
 use schc_rules::{NetmaskPair, RuleOptions, RuleSet};
 use std::sync::{Arc, mpsc};
@@ -49,16 +51,36 @@ fn process_frame(
             Ok(compressed)
         }
         Direction::Downlink => {
-            // The frame is arriving through the interface, so we have to decompress
-            let decompressed = schc::decompress_frame(rules, &frame);
-            println!(
-                "D ({ethertype}): {} -> {}",
-                frame_bytes.len(),
-                decompressed.len()
-            );
-            Ok(decompressed)
+            // The frame is arriving through the interface, so we probably have to decompress
+            if frame_was_probably_compressed(&frame) {
+                let decompressed = schc::decompress_frame(rules, &frame);
+                println!(
+                    "D ({ethertype}): {} -> {}",
+                    frame_bytes.len(),
+                    decompressed.len()
+                );
+                Ok(decompressed)
+            } else {
+                println!("D ({ethertype}): {} (NOT decompressed)", frame_bytes.len(),);
+                Ok(frame.packet().to_vec())
+            }
         }
     }
+}
+
+fn frame_was_probably_compressed(frame: &EthernetPacket) -> bool {
+    let has_forwardable_ethertype = frame.get_ethertype() == EtherTypes::Ipv6;
+
+    let ipv6_packet = Ipv6Packet::new(frame.payload());
+    let is_valid_ipv6_packet = ipv6_packet.is_some_and(|p| {
+        p.get_version() == 6
+            && p.get_payload_length() == p.packet().len() as u16 - 40
+            && p.packet().len() == frame.payload().len()
+    });
+
+    // Valid IPv6 packet? Then the frame was not compressed (compressed frames have at least one
+    // invalid byte at the beginning)
+    has_forwardable_ethertype && !is_valid_ipv6_packet
 }
 
 fn forward_frames(
@@ -125,7 +147,8 @@ fn main() -> anyhow::Result<()> {
         forward_frames(&tap_out, &tap_in, netmask_pairs, Direction::Downlink)
     });
 
-    println!("Forwarding incoming ethernet frames from {in_name} to {out_name}...");
+    println!("Forwarding ethernet frames from {in_name} to {out_name}...");
+    println!("Forwarding ethernet frames from {out_name} to {in_name}...");
 
     // This is a bit cumbersome, but is the only way I found to be notified of errors/crashes in the
     // forwarding threads (without extra dependencies)
