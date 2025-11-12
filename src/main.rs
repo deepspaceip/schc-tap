@@ -2,8 +2,9 @@ mod schc;
 mod schc_rules;
 mod varint;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use clap::Parser;
+use log::{LevelFilter, error, info, warn};
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ipv6::Ipv6Packet;
@@ -43,7 +44,7 @@ fn process_frame(
         Direction::Uplink => {
             // The frame is leaving the interface, so we have to compress
             let compressed = schc::compress_frame(rules, &frame);
-            println!(
+            info!(
                 "C ({ethertype}): {} -> {}",
                 frame_bytes.len(),
                 compressed.len()
@@ -53,15 +54,16 @@ fn process_frame(
         Direction::Downlink => {
             // The frame is arriving through the interface, so we probably have to decompress
             if frame_was_probably_compressed(&frame) {
-                let decompressed = schc::decompress_frame(rules, &frame);
-                println!(
+                let decompressed =
+                    schc::decompress_frame(rules, &frame).context("failed to decompress frame")?;
+                info!(
                     "D ({ethertype}): {} -> {}",
                     frame_bytes.len(),
                     decompressed.len()
                 );
                 Ok(decompressed)
             } else {
-                println!("D ({ethertype}): {} (NOT decompressed)", frame_bytes.len(),);
+                info!("D ({ethertype}): {} (NOT decompressed)", frame_bytes.len(),);
                 Ok(frame.packet().to_vec())
             }
         }
@@ -107,7 +109,7 @@ fn forward_frames(
                 sender.send(&processed)?;
             }
             Err(e) => {
-                println!("WARN: dropping frame. Cause: {e}");
+                warn!("dropping frame. Failed to process: {e:?}");
             }
         }
     }
@@ -119,6 +121,10 @@ fn forward_frames(
 struct Cli {
     #[arg(short, long)]
     swap_netmask_pairs: bool,
+    #[arg(short, long, group = "verbosity")]
+    verbose: bool,
+    #[arg(short, long, group = "verbosity")]
+    quiet: bool,
     in_tap_ifname: String,
     out_tap_ifname: String,
     netmask_pairs: Vec<NetmaskPair>,
@@ -127,6 +133,19 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let log_level = if cli.quiet {
+        LevelFilter::Warn
+    } else if cli.verbose {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Info
+    };
+    env_logger::Builder::new()
+        .filter_level(log_level)
+        .format_target(false)
+        .format_timestamp(None)
+        .init();
+
     let in_name = &cli.in_tap_ifname;
     let out_name = &cli.out_tap_ifname;
     let mut netmask_pairs = cli.netmask_pairs;
@@ -134,8 +153,14 @@ fn main() -> anyhow::Result<()> {
         netmask_pairs = netmask_pairs.into_iter().map(|p| p.swapped()).collect();
     }
 
-    let tap_in = open_tap(in_name, "10.10.0.22", "fe80::22")?;
-    let tap_out = open_tap(out_name, "10.10.0.33", "fe80::33")?;
+    let in_ipv4 = "10.10.0.22";
+    let in_ipv6 = "fe80::22";
+    let out_ipv4 = "10.10.0.33";
+    let out_ipv6 = "fe80::33";
+    let tap_in = open_tap(in_name, in_ipv4, in_ipv6)?;
+    let tap_out = open_tap(out_name, out_ipv4, out_ipv6)?;
+    info!("Created TAP interface {in_name} with addresses {in_ipv4} and {in_ipv6}");
+    info!("Created TAP interface {out_name} with addresses {out_ipv4} and {out_ipv6}");
 
     let tap_in_cp = tap_in.clone();
     let tap_out_cp = tap_out.clone();
@@ -147,8 +172,8 @@ fn main() -> anyhow::Result<()> {
         forward_frames(&tap_out, &tap_in, netmask_pairs, Direction::Downlink)
     });
 
-    println!("Forwarding ethernet frames from {in_name} to {out_name}...");
-    println!("Forwarding ethernet frames from {out_name} to {in_name}...");
+    info!("Forwarding ethernet frames from {in_name} to {out_name}...");
+    info!("Forwarding ethernet frames from {out_name} to {in_name}...");
 
     // This is a bit cumbersome, but is the only way I found to be notified of errors/crashes in the
     // forwarding threads (without extra dependencies)
@@ -168,9 +193,9 @@ fn main() -> anyhow::Result<()> {
             Ok(Err(e)) => format!("(the thread exited with an error: {e:?})"),
             Err(_) => "(the thread panicked)".to_string(),
         };
-        println!("The forwarding thread for {t_name} terminated unexpectedly {extra}");
+        error!("The forwarding thread for {t_name} terminated unexpectedly {extra}");
     }
 
-    println!("Shutting down!");
+    info!("Shutting down!");
     Ok(())
 }

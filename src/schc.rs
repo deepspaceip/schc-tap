@@ -2,10 +2,12 @@
 
 use crate::schc_rules::RuleSet;
 use crate::varint;
+use anyhow::anyhow;
 use bitvec::field::BitField;
 use bitvec::order::Msb0;
 use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
+use log::debug;
 use pnet::packet::Packet;
 use pnet::packet::ethernet::EthernetPacket;
 use pnet::packet::ip::IpNextHeaderProtocols;
@@ -72,7 +74,7 @@ impl Rule {
                 .find(|fd| fd.direction.matches(direction))
             else {
                 // No field descriptor found for this direction
-                println!("matches({:?}) = false (no mo for direction)", fd.identifier);
+                debug!("matches({:?}) = false (no mo for direction)", fd.identifier);
                 return false;
             };
 
@@ -109,7 +111,7 @@ impl Rule {
             };
 
             let matches = fid_matches && mo_matches;
-            println!(
+            debug!(
                 "matches({:?}, {:?}) = {matches}",
                 selected_mo.matching_operator, fd.identifier
             );
@@ -450,7 +452,7 @@ pub fn compress_frame(rules: &RuleSet, frame: &EthernetPacket) -> Vec<u8> {
     rule.compress(rule_id, frame)
 }
 
-pub fn decompress_frame(rules: &RuleSet, frame: &EthernetPacket) -> Vec<u8> {
+pub fn decompress_frame(rules: &RuleSet, frame: &EthernetPacket) -> anyhow::Result<Vec<u8>> {
     let mut cursor = Cursor::new(frame.payload());
     let rule_id = varint::decode(&mut cursor) as usize;
     if rule_id == NO_RULE_ID as usize {
@@ -458,11 +460,14 @@ pub fn decompress_frame(rules: &RuleSet, frame: &EthernetPacket) -> Vec<u8> {
         let mut decompressed = Vec::new();
         decompressed.extend_from_slice(&frame.packet()[..ETHERNET_HEADER_LEN_BYTES]);
         decompressed.extend_from_slice(&frame.payload()[1..]);
-        return decompressed;
+        return Ok(decompressed);
     }
 
     let rule_id_len = cursor.position() as usize;
     let rule_index = rule_id - 1;
-    let rule = rules.rules.get(rule_index).unwrap();
-    rule.decompress(frame, rule_id_len)
+    let rule = rules
+        .rules
+        .get(rule_index)
+        .ok_or(anyhow!("unknown SCHC rule"))?;
+    Ok(rule.decompress(frame, rule_id_len))
 }

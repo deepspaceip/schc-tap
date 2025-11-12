@@ -474,7 +474,7 @@ mod tests {
             );
 
             let compressed_frame = EthernetPacket::new(&compressed).unwrap();
-            let decompressed = decompress_frame(&rules, &compressed_frame);
+            let decompressed = decompress_frame(&rules, &compressed_frame).unwrap();
             assert_eq!(decompressed.len(), bytes.len());
             assert_eq!(decompressed, bytes);
 
@@ -551,7 +551,8 @@ mod tests {
             let outgoing_decompressed = decompress_frame(
                 &rules_peer_b,
                 &EthernetPacket::new(&outgoing_compressed).unwrap(),
-            );
+            )
+            .unwrap();
             assert_eq!(outgoing_decompressed.len(), outgoing_packet_bytes.len());
             assert_eq!(outgoing_decompressed, outgoing_packet_bytes);
 
@@ -559,7 +560,8 @@ mod tests {
             let incoming_decompressed = decompress_frame(
                 &rules_peer_a,
                 &EthernetPacket::new(&incoming_compressed).unwrap(),
-            );
+            )
+            .unwrap();
             assert_eq!(incoming_decompressed.len(), incoming_packet_bytes.len());
             assert_eq!(incoming_decompressed, incoming_packet_bytes);
         }
@@ -576,7 +578,7 @@ mod tests {
         assert_eq!(compressed.len(), bytes.len() + 1);
 
         let compressed_frame = EthernetPacket::new(&compressed).unwrap();
-        let decompressed = decompress_frame(&rules, &compressed_frame);
+        let decompressed = decompress_frame(&rules, &compressed_frame).unwrap();
 
         assert_eq!(decompressed.len(), bytes.len());
         assert_eq!(decompressed, bytes);
